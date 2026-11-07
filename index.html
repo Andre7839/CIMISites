@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/pmtiles@3.2.1/dist/pmtiles.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
 <style>
 :root{
   --bg:#f4f6f9;--panel:#ffffff;--panel2:#f3f6f9;--line:#dde3ea;--txt:#1f2933;--mut:#66788a;
@@ -57,6 +58,9 @@ label.ck{display:flex;align-items:center;gap:7px;margin:4px 0;cursor:pointer}
 .tabs button{flex:1;border:0;border-radius:0;background:transparent;padding:10px 4px;color:var(--mut);border-bottom:2px solid transparent}
 .tabs button.act{color:var(--txt);border-bottom-color:var(--acc)}
 .tabbody{flex:1;overflow:auto;padding:12px 14px}
+#periodbar{padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}
+.progress>div{height:100%;background:var(--acc);width:0}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:6px 0}
 .kv div:nth-child(odd){color:var(--mut)}
 .kv div:nth-child(even){text-align:right;font-variant-numeric:tabular-nums}
@@ -147,11 +151,14 @@ a{color:var(--acc)}
       <button data-t="soil">Soil</button>
       <button data-t="hyd">Hydraulics</button>
       <button data-t="clim">Climate</button>
+      <button data-t="ndvi">Vegetation</button>
     </div>
+    <div id="periodbar" hidden></div>
     <div class="tabbody" id="tb-field"></div>
     <div class="tabbody" id="tb-soil" hidden></div>
     <div class="tabbody" id="tb-hyd" hidden></div>
     <div class="tabbody" id="tb-clim" hidden></div>
+    <div class="tabbody" id="tb-ndvi" hidden></div>
   </aside>
 </div>
 
@@ -4755,11 +4762,14 @@ function setUnits(u){
   if(S.field) renderField();
   if(S.soil){renderSoil();renderHyd();}
   if(S.climate) renderClimate();
+  if(S.ndvi&&S.ndvi.done) renderNdvi();
 }
 function showTab(t){
   $('tabs').querySelectorAll('button').forEach(b=>b.classList.toggle('act',b.dataset.t===t));
-  ['field','soil','hyd','clim'].forEach(x=>$('tb-'+x).hidden=x!==t);
+  ['field','soil','hyd','clim','ndvi'].forEach(x=>$('tb-'+x).hidden=x!==t);
+  $('periodbar').hidden=!(S.field&&(t==='clim'||t==='ndvi'));
   if(t==='clim'&&!S.climate&&S.field&&!S.climLoading) loadClimate();
+  if(t==='ndvi'&&S.ndvi&&S.ndvi.done) drawNdviChart();
 }
 
 /* ===================== Field selection ===================== */
@@ -4770,16 +4780,19 @@ function selectField(p,ll){
   const wasOpen=!$('app').classList.contains('noinfo');
   $('app').classList.remove('noinfo');
   if(!wasOpen) setTimeout(()=>map.resize(),0);
-  S.field={id:p.id,c:p.c,a:p.a,k:p.k,lat:ll.lat,lon:ll.lng}; S.soil=null; S.climate=null; S.comp=0;
+  S.field={id:p.id,c:p.c,a:p.a,k:p.k,lat:ll.lat,lon:ll.lng}; S.soil=null; S.climate=null; S.comp=0; S.ndvi=null;
   map.setFilter('sel-line',['==',['id'],p.id]);
   map.getSource('sel').setData({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Point',coordinates:[ll.lng,ll.lat]}}]});
   renderField(); showTab('field');
   $('tb-soil').innerHTML='<div class="status">Querying USDA Soil Data Access (SSURGO)…</div>';
   $('tb-hyd').innerHTML='<div class="status">Waiting for SSURGO horizons…</div>';
-  $('tb-clim').innerHTML=climControlsHTML()+'<div id="climout"></div>';
-  bindClimControls();
+  if(!$('cStart')){ $('periodbar').innerHTML=climControlsHTML(); bindClimControls(); }
+  $('tb-clim').innerHTML='<div id="climout"></div>';
+  $('tb-ndvi').innerHTML=ndviControlsHTML()+'<div id="ndviout"></div>';
+  bindNdviControls();
   loadSoil();
   if(!$('tb-clim').hidden) loadClimate();
+  loadNDVI();
 }
 function renderField(){
   const f=S.field, c=CROPS[f.c], ns=nearestStations(f.lat,f.lon,3);
@@ -5065,15 +5078,14 @@ function climControlsHTML(){
   const end=new Date(Date.now()-7*864e5), start=new Date(end.getTime()-364*864e5);
   return `<div class="row"><div><div class="mut small">Start</div><input type="date" id="cStart" value="${isoDate(start)}" min="1981-01-01"></div>
     <div><div class="mut small">End</div><input type="date" id="cEnd" value="${isoDate(end)}" min="1981-01-02"></div></div>
-   <div class="btnrow" style="margin-top:8px"><button id="cLoad" class="pri">Fetch NASA POWER</button><button id="cCsv" disabled>Export CSV</button>
+   <div class="btnrow" style="margin-top:8px"><button id="cLoad" class="pri">Update climate &amp; vegetation</button>
     <select id="cPreset" style="width:auto"><option value="">Quick range…</option><option value="365">Last 12 months</option><option value="ytd">This year</option><option value="2022">Year 2022 (crop map year)</option><option value="1095">Last 3 years</option></select></div>`;
 }
 function bindClimControls(){
-  $('cLoad').onclick=()=>loadClimate();
-  $('cCsv').onclick=exportClimCSV;
+  $('cLoad').onclick=()=>{loadClimate();loadNDVI();};
   $('cPreset').onchange=e=>{const v=e.target.value; if(!v) return; const end=new Date(Date.now()-7*864e5); let s,en=end;
     if(v==='ytd') s=new Date(end.getFullYear(),0,1); else if(v==='2022'){s=new Date(2022,0,1);en=new Date(2022,11,31);} else s=new Date(end.getTime()-(+v-1)*864e5);
-    $('cStart').value=isoDate(s); $('cEnd').value=isoDate(en); e.target.value=''; loadClimate();};
+    $('cStart').value=isoDate(s); $('cEnd').value=isoDate(en); e.target.value=''; loadClimate(); loadNDVI();};
 }
 async function loadClimate(){
   const f=S.field; if(!f) return; const myKey=f.id+':'+f.lat;
@@ -5124,11 +5136,12 @@ function et0FAO56(o,lat,elev){
   return Math.max(0,et);
 }
 function renderClimate(){
-  const {rows,elev}=S.climate; $('cCsv').disabled=false;
+  const {rows,elev}=S.climate;
   const sum=k=>rows.reduce((a,r)=>a+(r[k]??0),0), mean=k=>{const v=rows.map(r=>r[k]).filter(x=>x!=null);return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;};
   const tx=Math.max(...rows.map(r=>r.T2M_MAX??-99)), tn=Math.min(...rows.map(r=>r.T2M_MIN??99));
   const ns=nearestStations(S.climate.lat,S.climate.lon,1)[0];
   $('climout').innerHTML=`
+   <div class="btnrow"><button id="cCsv">Export climate CSV</button></div>
    <div class="tiles">
      <div class="tile"><div class="v">${fu('water',sum('PRECTOTCORR'),0,1)}</div><div class="l">Precip ${ul('water')}</div></div>
      <div class="tile"><div class="v">${fu('water',sum('ET0'),0,1)}</div><div class="l">ET₀ ${ul('water')} (FAO-56)</div></div>
@@ -5139,6 +5152,7 @@ function renderClimate(){
    </div>
    <div class="card"><h4>Air temperature (${ul('temp')})</h4><canvas id="chT" class="chart"></canvas></div>
    <div class="card"><h4>Reference ET₀ &amp; rainfall (${ul('water')}/day)</h4><canvas id="chP" class="chart"></canvas></div>
+   <div id="climSeason">${climSeasonHTML()}</div>
    <div class="card"><h4>Solar radiation (${ul('rad')}) &amp; RH (%)</h4><canvas id="chR" class="chart"></canvas></div>
    <div class="card"><h4>Daily data</h4><div class="scroll"><table class="t">
      <tr><th>Date</th><th>Tmax ${ul('temp')}</th><th>Tmin ${ul('temp')}</th><th>RH %</th><th>u₂ ${ul('wind')}</th><th>Rs ${ul('rad')}</th><th>P ${ul('water')}</th><th>ET₀ ${ul('water')}</th></tr>
@@ -5146,6 +5160,8 @@ function renderClimate(){
    </table></div></div>
    <p class="hint">Source: NASA POWER daily API (community AG, local solar time). ET₀ computed here with FAO-56 Penman–Monteith from Tmax/Tmin, dew point, 2 m wind and all-sky shortwave. Recent days may be missing until POWER finalizes them.</p>`;
   drawClimCharts();
+  $('cCsv').onclick=exportClimCSV;
+  if(S.ndvi&&S.ndvi.done) renderNdvi();
 }
 function drawClimCharts(){
   ['T','P','R'].forEach(killChart);
@@ -5160,7 +5176,7 @@ function drawClimCharts(){
   oP.scales.y2={position:'right',min:0,reverse:false,title:{display:true,text:`Rainfall (${ul('water')}/day)`,color:'#3a6ea5'},ticks:{color:'#3a6ea5'},grid:{drawOnChartArea:false}};
   S.charts.P=new Chart($('chP'),{data:{labels:L,datasets:[
     {type:'line',label:'ET₀ (FAO-56)',data:r.map(x=>cv('water',x.ET0)),borderColor:'#1e8e5a',backgroundColor:'#1e8e5a',pointRadius:0,borderWidth:1.6,yAxisID:'y',order:0},
-    {type:'bar',label:'Rainfall',data:r.map(x=>cv('water',x.PRECTOTCORR)),backgroundColor:'#4e79a7cc',yAxisID:'y2',order:1}]},options:oP});
+    {type:'bar',label:'Rainfall',data:r.map(x=>cv('water',x.PRECTOTCORR)),backgroundColor:'#4e79a7cc',yAxisID:'y2',order:1}]},options:oP,plugins:[seasonPlugin]});
   const o=base(); o.scales.y2={position:'right',ticks:{color:TICK},grid:{drawOnChartArea:false},min:0,max:100};
   S.charts.R=new Chart($('chR'),{type:'line',data:{labels:L,datasets:[
     {label:'Rs all-sky',data:r.map(x=>cv('rad',x.ALLSKY_SFC_SW_DWN)),borderColor:'#f28e2b',pointRadius:0,borderWidth:1.2},
@@ -5175,6 +5191,329 @@ function exportClimCSV(){
   const head=['date',...POWER_PARAMS.map(k=>k+tag(k)),'ET0_FAO56_'+ul('water'),IMP()?'GDD50F':'GDD10C'];
   const out=[head,...rows.map(r=>[r.date,...POWER_PARAMS.map(k=>r3(KIND[k]?cv(KIND[k],r[k]):r[k])),r3(cv('water',r.ET0)),r3(cv('gdd',r.GDD10))])];
   downloadText(`nasapower_daily_${lat.toFixed(4)}_${lon.toFixed(4)}_${IMP()?'imperial':'metric'}.csv`,toCSV(out));
+}
+
+
+/* ===================== Sentinel-2 vegetation indices (Earth Search STAC + COG windows) ===================== */
+const STAC_URL='https://earth-search.aws.element84.com/v1/search';
+const NDVI_OPT={cloud:70,minClear:60,edge:true};
+const VEG={index:'evi2',lambda:2000,thr:20,envelope:true};
+const VI={
+  ndvi:{label:'NDVI', min:-0.1,max:1,   minAmp:0.08, f:(R,N)=>(N-R)/(N+R)},
+  evi2:{label:'EVI2', min:-0.1,max:1,   minAmp:0.06, f:(R,N)=>2.5*(N-R)/(N+2.4*R+1)},
+  nirv:{label:'NIRv', min:-0.05,max:0.6,minAmp:0.03, f:(R,N)=>N*(N-R)/(N+R)},
+  savi:{label:'SAVI', min:-0.1,max:1,   minAmp:0.06, f:(R,N)=>1.5*(N-R)/(N+R+0.5)}
+};
+const VI_KEYS=Object.keys(VI);
+function ndviControlsHTML(){
+  return `<div class="row small">
+     <div><div class="mut">Index</div><select id="vIndex">${VI_KEYS.map(k=>`<option value="${k}" ${k===VEG.index?'selected':''}>${VI[k].label}</option>`).join('')}</select></div>
+     <div><div class="mut">Smoothing</div><select id="vLam">${[[300,'Light'],[2000,'Medium'],[10000,'Strong']].map(([v,l])=>`<option value="${v}" ${v===VEG.lambda?'selected':''}>${l}</option>`).join('')}</select></div>
+     <div><div class="mut">Season threshold</div><select id="vThr">${[10,20,30,40,50].map(v=>`<option value="${v}" ${v===VEG.thr?'selected':''}>${v}% of amplitude</option>`).join('')}</select></div></div>
+   <label class="ck small"><input type="checkbox" id="vEnv" ${VEG.envelope?'checked':''}> Upper-envelope fit (down-weights residual cloud/shadow dips)</label>
+   <details class="small" style="margin:4px 0 8px"><summary class="mut" style="cursor:pointer">Scene filtering</summary>
+   <div class="row" style="margin-top:6px"><div><div class="mut">Max scene cloud %</div><input type="number" id="nCloud" min="5" max="100" step="5" value="${NDVI_OPT.cloud}"></div>
+    <div><div class="mut">Min clear field %</div><input type="number" id="nClear" min="10" max="100" step="5" value="${NDVI_OPT.minClear}"></div></div>
+   <label class="ck"><input type="checkbox" id="nEdge" ${NDVI_OPT.edge?'checked':''}> Exclude edge pixels (≥ 5 m inside boundary)</label>
+   <button id="nRun">Re-run satellite retrieval</button></details>
+   <div class="btnrow"><button id="nCsv" disabled>Export observations CSV</button><button id="sCsv" disabled>Export seasons CSV</button></div>`;
+}
+function bindNdviControls(){
+  $('nRun').onclick=()=>{NDVI_OPT.cloud=+$('nCloud').value||70;NDVI_OPT.minClear=+$('nClear').value||60;NDVI_OPT.edge=$('nEdge').checked;loadNDVI();};
+  const re=()=>{VEG.index=$('vIndex').value;VEG.lambda=+$('vLam').value;VEG.thr=+$('vThr').value;VEG.envelope=$('vEnv').checked;
+    if(S.ndvi&&S.ndvi.done){analyzeSeasons();renderNdvi();refreshClimSeasons();}};
+  ['vIndex','vLam','vThr','vEnv'].forEach(id=>$(id).onchange=re);
+  $('nCsv').onclick=exportNdviCSV; $('sCsv').onclick=exportSeasonCSV;
+}
+/* WGS84 -> UTM (northern hemisphere), Snyder (1987) */
+function toUTM(lon,lat,zone){
+  const a=6378137,f=1/298.257223563,k0=0.9996,e2=f*(2-f),ep2=e2/(1-e2),r=Math.PI/180;
+  const lon0=((zone-1)*6-180+3)*r,phi=lat*r,lam=lon*r;
+  const N=a/Math.sqrt(1-e2*Math.sin(phi)**2),T=Math.tan(phi)**2,C=ep2*Math.cos(phi)**2,A=Math.cos(phi)*(lam-lon0);
+  const M=a*((1-e2/4-3*e2*e2/64-5*e2**3/256)*phi-(3*e2/8+3*e2*e2/32+45*e2**3/1024)*Math.sin(2*phi)+(15*e2*e2/256+45*e2**3/1024)*Math.sin(4*phi)-(35*e2**3/3072)*Math.sin(6*phi));
+  const E=k0*N*(A+(1-T+C)*A**3/6+(5-18*T+T*T+72*C-58*ep2)*A**5/120)+500000;
+  const Nn=k0*(M+N*Math.tan(phi)*(A*A/2+(5-T+9*C+4*C*C)*A**4/24+(61-58*T+T*T+600*C-330*ep2)*A**6/720));
+  return [E,Nn];
+}
+function waitIdle(){return new Promise(res=>{map.once('idle',res);map.triggerRepaint();setTimeout(res,8000);});}
+async function fieldPolygons(id,lon,lat){
+  if(map.getZoom()<11){ map.easeTo({center:[lon,lat],zoom:13.5,duration:600}); await waitIdle(); }
+  const fs=map.querySourceFeatures('crops',{sourceLayer:'fields',filter:['==',['id'],id]});
+  const polys=[];
+  for(const f of fs){const g=f.geometry; if(!g) continue;
+    if(g.type==='Polygon') polys.push(g.coordinates); else if(g.type==='MultiPolygon') g.coordinates.forEach(p=>polys.push(p));}
+  return polys;
+}
+function ringContains(ring,x,y){let c=false;for(let i=0,j=ring.length-1;i<ring.length;j=i++){const[xi,yi]=ring[i],[xj,yj]=ring[j];
+  if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi)) c=!c;} return c;}
+function segDist(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy;let t=l?((px-ax)*dx+(py-ay)*dy)/l:0;t=Math.max(0,Math.min(1,t));const ex=ax+t*dx-px,ey=ay+t*dy-py;return Math.sqrt(ex*ex+ey*ey);}
+function polyDepth(poly,x,y){ // >0 inside (distance to nearest edge), <0 outside
+  if(!ringContains(poly[0],x,y)) return -1; for(let h=1;h<poly.length;h++) if(ringContains(poly[h],x,y)) return -1;
+  let d=Infinity; for(const ring of poly) for(let i=0,j=ring.length-1;i<ring.length;j=i++) d=Math.min(d,segDist(x,y,ring[j][0],ring[j][1],ring[i][0],ring[i][1]));
+  return d;
+}
+async function stacSearch(lon,lat,start,end,cloud,signal,coll){
+  let body={collections:[coll],intersects:{type:'Point',coordinates:[+lon.toFixed(6),+lat.toFixed(6)]},
+    datetime:`${start}T00:00:00Z/${end}T23:59:59Z`,limit:200,query:{'eo:cloud_cover':{lt:cloud}},
+    sortby:[{field:'properties.datetime',direction:'asc'}]};
+  const items=[];
+  for(let page=0;page<10&&body;page++){
+    const r=await fetch(STAC_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal});
+    if(!r.ok) throw new Error('Earth Search HTTP '+r.status);
+    const j=await r.json(); items.push(...(j.features||[]));
+    const nx=(j.links||[]).find(l=>l.rel==='next'); body=nx&&nx.body?{...body,...nx.body}:null;
+  }
+  return items;
+}
+function bandMeta(asset){const b=(asset['raster:bands']||[])[0]||{};return {scale:b.scale??1e-4,offset:b.offset??0,nodata:b.nodata??0};}
+function itemEPSG(it){const p=it.properties||{};
+  let e=p['proj:epsg']??it.assets?.red?.['proj:epsg']; const code=p['proj:code']??it.assets?.red?.['proj:code']; if(!e&&code) e=+String(code).split(':')[1];
+  if(!e&&p['mgrs:utm_zone']) e=32600+(+p['mgrs:utm_zone']); return e?+e:null;}
+async function readWindow(href,bb,signal){
+  const tiff=await GeoTIFF.fromUrl(href,{allowFullFile:false}); const img=await tiff.getImage();
+  const [ox,oy]=img.getOrigin(), [rx,ry]=img.getResolution(), W=img.getWidth(), H=img.getHeight();
+  const c0=Math.max(0,Math.floor((bb[0]-ox)/rx)), c1=Math.min(W,Math.ceil((bb[2]-ox)/rx));
+  const r0=Math.max(0,Math.floor((bb[3]-oy)/ry)), r1=Math.min(H,Math.ceil((bb[1]-oy)/ry));
+  if(c1<=c0||r1<=r0) return null;
+  const ras=await img.readRasters({window:[c0,r0,c1,r1],samples:[0],signal});
+  return {data:ras[0],c0,r0,w:c1-c0,h:r1-r0,ox,oy,rx,ry};
+}
+const SCL_OK=new Set([4,5,6]);
+function arrStats(v){ if(!v.length) return null; v.sort((a,b)=>a-b); const n=v.length; let s=0,s2=0; for(const x of v){s+=x;s2+=x*x;}
+  const m=s/n; return {mean:m,sd:n>1?Math.sqrt(Math.max(0,(s2-n*m*m)/(n-1))):0,p10:v[Math.floor(0.1*(n-1))],p90:v[Math.floor(0.9*(n-1))]}; }
+async function processScene(it,polysLL,signal){
+  const epsg=itemEPSG(it); if(!epsg||epsg<32601||epsg>32660) return {skip:'unsupported CRS'};
+  const zone=epsg-32600;
+  const polys=polysLL.map(p=>p.map(ring=>ring.map(([x,y])=>toUTM(x,y,zone))));
+  let bb=[Infinity,Infinity,-Infinity,-Infinity];
+  polys.forEach(p=>p[0].forEach(([x,y])=>{bb[0]=Math.min(bb[0],x);bb[1]=Math.min(bb[1],y);bb[2]=Math.max(bb[2],x);bb[3]=Math.max(bb[3],y);}));
+  const A=it.assets; if(!A.red||!A.nir||!A.scl) return {skip:'missing bands'};
+  const [red,nir,scl]=await Promise.all([readWindow(A.red.href,bb,signal),readWindow(A.nir.href,bb,signal),readWindow(A.scl.href,bb,signal)]);
+  if(!red||!nir||!scl) return {skip:'field outside tile'};
+  const mr=bandMeta(A.red), mn=bandMeta(A.nir);
+  const minDepth=NDVI_OPT.edge?5:0;
+  let tot=0,ok=0; const vals=Object.fromEntries(VI_KEYS.map(k=>[k,[]]));
+  for(let r=0;r<red.h;r++) for(let c=0;c<red.w;c++){
+    const x=red.ox+(red.c0+c+0.5)*red.rx, y=red.oy+(red.r0+r+0.5)*red.ry;
+    let depth=-1; for(const p of polys){const d=polyDepth(p,x,y); if(d>depth) depth=d;}
+    if(depth<0||depth<minDepth) continue;
+    tot++;
+    const sc=Math.floor((x-scl.ox)/scl.rx)-scl.c0, sr=Math.floor((y-scl.oy)/scl.ry)-scl.r0;
+    const s=(sc>=0&&sr>=0&&sc<scl.w&&sr<scl.h)?scl.data[sr*scl.w+sc]:0;
+    if(!SCL_OK.has(s)) continue;
+    const nc=Math.floor((x-nir.ox)/nir.rx)-nir.c0, nr=Math.floor((y-nir.oy)/nir.ry)-nir.r0;
+    const dr=red.data[r*red.w+c], dn=(nc>=0&&nr>=0&&nc<nir.w&&nr<nir.h)?nir.data[nr*nir.w+nc]:0;
+    if(dr===mr.nodata||dn===mn.nodata) continue;
+    const R=Math.max(0,dr*mr.scale+mr.offset), Nn=Math.max(0,dn*mn.scale+mn.offset); if(R+Nn<=0) continue;
+    ok++; for(const k of VI_KEYS){const v=VI[k].f(R,Nn); if(isFinite(v)) vals[k].push(v);}
+  }
+  if(!tot) return {skip:'no pixels inside field'};
+  const idx=Object.fromEntries(VI_KEYS.map(k=>[k,arrStats(vals[k])]));
+  return {date:it.properties.datetime.slice(0,10),id:it.id,platform:it.properties.platform||'',sceneCloud:it.properties['eo:cloud_cover'],
+    tot,ok,clearPct:100*ok/tot,mean:idx.ndvi?idx.ndvi.mean:null,idx};
+}
+async function loadNDVI(){
+  const f=S.field; if(!f||!$('ndviout')) return;
+  if(S.ndviAbort) S.ndviAbort.abort();
+  const ac=new AbortController(); S.ndviAbort=ac; const myKey=f.id+':'+f.lat;
+  const start=$('cStart').value, end=$('cEnd').value;
+  const out=$('ndviout'); $('nCsv').disabled=true; $('sCsv').disabled=true;
+  const stale=()=>ac.signal.aborted||!S.field||S.field.id+':'+S.field.lat!==myKey;
+  const status=(msg,frac)=>{ if(stale()) return; out.innerHTML=`<div class="status">${msg}${frac!=null?`<div class="progress"><div style="width:${(100*frac).toFixed(0)}%"></div></div>`:''}</div>`; };
+  if(!start||!end||start>end){out.innerHTML='<div class="status err">Pick a valid period.</div>';return;}
+  if(end<'2015-07-01'){out.innerHTML='<div class="status err">Sentinel-2 data start in mid-2015; choose a later period.</div>';return;}
+  S.ndvi={start,end,obs:[],rej:[],done:false,seasons:[]}; refreshClimSeasons();
+  try{
+    status('Getting field boundary…');
+    const polys=await fieldPolygons(f.id,f.lon,f.lat); if(stale()) return;
+    if(!polys.length) throw new Error('could not read the field boundary from the map tiles; zoom in on the field and press Re-run');
+    status('Searching Sentinel-2 L2A scenes (Earth Search)…');
+    let items=await stacSearch(f.lon,f.lat,start,end,NDVI_OPT.cloud,ac.signal,'sentinel-2-c1-l2a'); if(stale()) return;
+    if(!items.length){ items=await stacSearch(f.lon,f.lat,start,end,NDVI_OPT.cloud,ac.signal,'sentinel-2-l2a'); if(stale()) return; }
+    if(!items.length){out.innerHTML='<div class="status">No Sentinel-2 scenes below the cloud threshold for this period.</div>';return;}
+    let done=0; const res=[]; const queue=items.slice();
+    const worker=async()=>{ while(queue.length&&!stale()){ const it=queue.shift();
+        try{ const r=await processScene(it,polys,ac.signal); res.push(r.skip?{...r,date:it.properties.datetime.slice(0,10),id:it.id}:r); }
+        catch(e){ if(ac.signal.aborted) return; res.push({skip:'read error: '+e.message,date:it.properties.datetime.slice(0,10),id:it.id}); }
+        done++; status(`Reading Sentinel-2 pixels for this field… scene ${done}/${items.length}`,done/items.length); } };
+    await Promise.all([worker(),worker(),worker(),worker()]); if(stale()) return;
+    const byDate={};
+    for(const r of res){ if(r.skip) continue; const k=r.date; if(!byDate[k]||r.ok>byDate[k].ok) byDate[k]=r; }
+    const all=Object.values(byDate).sort((a,b)=>a.date<b.date?-1:1);
+    S.ndvi.obs=all.filter(r=>r.mean!=null&&r.clearPct>=NDVI_OPT.minClear);
+    S.ndvi.rej=all.filter(r=>!(r.mean!=null&&r.clearPct>=NDVI_OPT.minClear));
+    S.ndvi.nScenes=items.length; S.ndvi.errors=res.filter(r=>r.skip&&r.skip.startsWith('read error')).length;
+    S.ndvi.pixels=Math.max(0,...res.filter(r=>!r.skip).map(r=>r.tot));
+    S.ndvi.done=true; analyzeSeasons(); renderNdvi(); refreshClimSeasons();
+  }catch(err){ if(stale()) return;
+    out.innerHTML=`<div class="status err">Satellite retrieval failed: ${esc(err.message)}<br>Sentinel-2 data come from Earth Search (AWS); check your internet connection.</div>`; }
+}
+
+/* ---------- Phenology: Whittaker smoother + amplitude-threshold season extraction ---------- */
+function periodDays(start,end){const d=[];for(let t=Date.parse(start+'T00:00:00Z');t<=Date.parse(end+'T00:00:00Z');t+=864e5) d.push(new Date(t).toISOString().slice(0,10));return d;}
+function solveBanded(d0,d1,d2,b){ // LDLᵀ for symmetric pentadiagonal (robust form)
+  const n=b.length, D=new Float64Array(n), l1=new Float64Array(n), l2=new Float64Array(n);
+  for(let i=0;i<n;i++){
+    if(i>=2) l2[i]=d2[i-2]/D[i-2];
+    if(i>=1) l1[i]=(d1[i-1]-(i>=2?l2[i]*D[i-2]*l1[i-1]:0))/D[i-1];
+    D[i]=d0[i]-(i>=1?l1[i]*l1[i]*D[i-1]:0)-(i>=2?l2[i]*l2[i]*D[i-2]:0);
+    if(Math.abs(D[i])<1e-12) D[i]=1e-12;
+  }
+  const z=new Float64Array(n);
+  for(let i=0;i<n;i++) z[i]=b[i]-(i>=1?l1[i]*z[i-1]:0)-(i>=2?l2[i]*z[i-2]:0);
+  for(let i=0;i<n;i++) z[i]/=D[i];
+  for(let i=n-1;i>=0;i--) z[i]-= (i+1<n?l1[i+1]*z[i+1]:0)+(i+2<n?l2[i+2]*z[i+2]:0);
+  return Array.from(z);
+}
+function analyzeSeasons(){
+  const n=S.ndvi; n.seasons=[]; n.smooth=null; n.days=periodDays(n.start,n.end);
+  const key=VEG.index, obs=n.obs.filter(r=>r.idx&&r.idx[key]);
+  n.note='';
+  if(obs.length<6){ n.note=`Season detection needs at least 6 clear observations (${obs.length} available).`; return; }
+  const days=n.days, pos=Object.fromEntries(days.map((d,i)=>[d,i]));
+  const y=new Array(days.length).fill(0), w0=new Array(days.length).fill(0);
+  obs.forEach(r=>{const i=pos[r.date]; if(i!=null){y[i]=r.idx[key].mean; w0[i]=1;}});
+  const first=pos[obs[0].date], last=pos[obs[obs.length-1].date];
+  let w=w0.slice(), z=solveWhittaker(y,w,VEG.lambda);
+  if(VEG.envelope) for(let it=0;it<2;it++){ w=w0.map((wi,i)=>wi?(y[i]>=z[i]?1:0.4):0); z=solveWhittaker(y,w,VEG.lambda); }
+  const zz=z.map((v,i)=>(i<first||i>last)?null:v);
+  n.smooth=zz;
+  const valid=[]; for(let i=first;i<=last;i++) valid.push(i);
+  const zmax=Math.max(...valid.map(i=>z[i])), zmin=Math.min(...valid.map(i=>z[i]));
+  if(zmax-zmin<VI[key].minAmp){ n.note=`No clear seasonal cycle: ${VI[key].label} varies by only ${(zmax-zmin).toFixed(2)} over the period.`; return; }
+  // peaks with prominence
+  const peaks=[];
+  for(let i=first+1;i<last;i++) if(z[i]>=z[i-1]&&z[i]>z[i+1]) peaks.push(i);
+  if(z[first]>z[first+1]) peaks.unshift(first);
+  if(z[last]>z[last-1]) peaks.push(last);
+  const promMin=Math.max(VI[key].minAmp,0.2*(zmax-zmin));
+  const kept=[];
+  for(const p of peaks){
+    let lm=z[p],hitL=true; for(let i=p-1;i>=first;i--){ if(z[i]>z[p]){hitL=false;break;} lm=Math.min(lm,z[i]); }
+    let rm=z[p],hitR=true; for(let i=p+1;i<=last;i++){ if(z[i]>z[p]){hitR=false;break;} rm=Math.min(rm,z[i]); }
+    const dL=z[p]-lm, dR=z[p]-rm; // a side that runs to the period edge is unknown, not a failed drop
+    if(Math.min(hitL?Infinity:dL,hitR?Infinity:dR)>=promMin&&Math.max(dL,dR)>=promMin) kept.push(p);
+  }
+  const argmin=(a,b)=>{let k=a;for(let i=a;i<=b;i++) if(z[i]<z[k]) k=i;return k;};
+  const thr=VEG.thr/100;
+  kept.forEach((p,k)=>{
+    const lb=argmin(k?kept[k-1]:first,p), rb=argmin(p,k<kept.length-1?kept[k+1]:last);
+    const zL=z[lb], zR=z[rb], zp=z[p];
+    if(zp-zL<promMin*0.5&&zp-zR<promMin*0.5) return;
+    const zB=Math.min(zL,zR), truncL=lb===first&&(zL-zB)>0.25*(zp-zB), truncR=rb===last&&(zR-zB)>0.25*(zp-zB);
+    let sos=lb; if(truncL) sos=first; else while(sos<p&&z[sos]<zL+thr*(zp-zL)) sos++;
+    let eos=rb; if(truncR) eos=last; else while(eos>p&&z[eos]<zR+thr*(zp-zR)) eos--;
+    const bse=truncL?zR:truncR?zL:(zL+zR)/2;
+    const s={sos:days[sos],pos:days[p],eos:days[eos],iS:sos,iP:p,iE:eos,peak:zp,base:bse,amp:zp-bse,
+      los:eos-sos,sosOpen:truncL,eosOpen:truncR,
+      greenup:p>sos?10*(zp-z[sos])/(p-sos):null, senesc:eos>p?10*(zp-z[eos])/(eos-p):null};
+    let integ=0; for(let i=sos;i<=eos;i++) integ+=z[i]-s.base; s.integral=integ;
+    if(s.sosOpen&&s.eosOpen&&s.los>=days.length-2) return; // flat-top over whole period: not a season
+    n.seasons.push(s);
+  });
+  if(!n.seasons.length) n.note='No growing season with a clear rise and fall was found in this period.';
+}
+function solveWhittaker(y,w,lambda){
+  const n=y.length; const d0=new Float64Array(n),d1=new Float64Array(n),d2=new Float64Array(n),b=new Float64Array(n);
+  for(let i=0;i<n;i++){d0[i]=w[i]+1e-9; b[i]=w[i]*y[i];}
+  for(let i=0;i<n-2;i++){ d0[i]+=lambda; d0[i+1]+=4*lambda; d0[i+2]+=lambda; d1[i]+=-2*lambda; d1[i+1]+=-2*lambda; d2[i]+=lambda; }
+  return solveBanded(d0,d1,d2,b);
+}
+function seasonClimate(s){
+  const c=S.climate; if(!c) return null;
+  const rows=c.rows.filter(r=>r.date>=s.sos&&r.date<=s.eos); if(!rows.length) return null;
+  const cover=rows.length/(s.los+1);
+  return {et0:rows.reduce((a,r)=>a+(r.ET0??0),0),rain:rows.reduce((a,r)=>a+(r.PRECTOTCORR??0),0),gdd:rows.reduce((a,r)=>a+(r.GDD10??0),0),cover};
+}
+const seasonPlugin={id:'seasons',beforeDatasetsDraw(chart){
+  const n=S.ndvi; if(!n||!n.seasons||!n.seasons.length) return;
+  const labels=chart.data.labels||[], x=chart.scales.x, a=chart.chartArea, g=chart.ctx;
+  const ix=d=>{const i=labels.indexOf(d); return i<0?null:x.getPixelForValue(i);};
+  g.save();
+  n.seasons.forEach(s=>{
+    let x0=ix(s.sos), x1=ix(s.eos), xp=ix(s.pos);
+    if(x0==null&&s.sos<labels[0]) x0=a.left; if(x1==null&&s.eos>labels[labels.length-1]) x1=a.right;
+    if(x0==null||x1==null) return;
+    g.fillStyle='rgba(90,209,154,0.13)'; g.fillRect(x0,a.top,x1-x0,a.bottom-a.top);
+    g.strokeStyle='rgba(30,142,90,0.7)'; g.setLineDash([4,3]); g.lineWidth=1;
+    [x0,x1].forEach(v=>{g.beginPath();g.moveTo(v,a.top);g.lineTo(v,a.bottom);g.stroke();});
+    if(xp!=null){g.setLineDash([]);g.strokeStyle='rgba(30,142,90,0.9)';g.beginPath();g.moveTo(xp,a.top);g.lineTo(xp,a.bottom);g.stroke();}
+    g.setLineDash([]); g.fillStyle='#1e8e5a'; g.font='10px Inter, system-ui, sans-serif';
+    g.fillText('SOS',x0+3,a.top+10); g.fillText('EOS',Math.max(x0+30,x1-24),a.top+10);
+  });
+  g.restore();
+}};
+function refreshClimSeasons(){ if(S.charts.P){ S.charts.P.update('none'); } if(S.climate&&$('climSeason')) $('climSeason').innerHTML=climSeasonHTML(); }
+function climSeasonHTML(){
+  const n=S.ndvi; if(!n||!n.seasons||!n.seasons.length) return '';
+  return `<div class="card"><h4>Growing season water balance (from ${VI[VEG.index].label})</h4><div class="scroll"><table class="t">
+    <tr><th>Season</th><th>Days</th><th>ET₀ ${ul('water')}</th><th>Rain ${ul('water')}</th><th>ET₀ − P ${ul('water')}</th><th>GDD ${IMP()?'°F·d':'°C·d'}</th></tr>
+    ${n.seasons.map(s=>{const c=seasonClimate(s);return `<tr><td>${s.sos} → ${s.eos}</td><td>${s.los}</td><td>${c?fu('water',c.et0,0,1):'–'}</td><td>${c?fu('water',c.rain,0,1):'–'}</td><td>${c?fu('water',c.et0-c.rain,0,1):'–'}</td><td>${c?fu('gdd',c.gdd,0):'–'}</td></tr>`;}).join('')}
+  </table></div><p class="hint">Shaded bands on the ET₀ &amp; rainfall chart mark the detected season(s).</p></div>`;
+}
+function renderNdvi(){
+  const n=S.ndvi, key=VEG.index, lab=VI[key].label;
+  const o=n.obs.filter(r=>r.idx&&r.idx[key]); $('nCsv').disabled=!o.length; $('sCsv').disabled=!n.seasons.length;
+  if(!o.length){$('ndviout').innerHTML=`<div class="status">No clear observations for this field in ${n.nScenes} scenes (try a higher cloud limit or lower min-clear % under Scene filtering).</div>`;return;}
+  const v=r=>r.idx[key];
+  const mx=o.reduce((a,b)=>v(b).mean>v(a).mean?b:a);
+  const seasonsHTML=n.seasons.length?`<div class="card"><h4>Growing season(s) — ${lab}, ${VEG.thr}% amplitude threshold</h4><div class="scroll"><table class="t">
+     <tr><th>#</th><th>Start (SOS)</th><th>Peak (POS)</th><th>End (EOS)</th><th>Length d</th><th>Peak</th><th>Amplitude</th><th>Green-up /10d</th><th>Senescence /10d</th><th>ET₀ ${ul('water')}</th><th>Rain ${ul('water')}</th></tr>
+     ${n.seasons.map((s,i)=>{const c=seasonClimate(s);return `<tr><td>${i+1}</td><td>${s.sos}${s.sosOpen?' ⟵':''}</td><td>${s.pos}</td><td>${s.eos}${s.eosOpen?' ⟶':''}</td><td>${s.los}</td><td>${fmt(s.peak,2)}</td><td>${fmt(s.amp,2)}</td><td>${fmt(s.greenup,3)}</td><td>${fmt(s.senesc,3)}</td><td>${c?fu('water',c.et0,0,1):'–'}</td><td>${c?fu('water',c.rain,0,1):'–'}</td></tr>`;}).join('')}
+   </table></div>${n.seasons.some(s=>s.sosOpen||s.eosOpen)?'<p class="hint">⟵ / ⟶ the season starts before or ends after the selected period, so that date is a period edge rather than a detected transition; widen the period for a true date.</p>':''}${S.climate?'':'<p class="hint">Load the Climate tab to see season ET₀ and rainfall.</p>'}</div>`
+   :`<div class="status">${esc(n.note||'No season detected.')}</div>`;
+  $('ndviout').innerHTML=`
+   <div class="tiles">
+     <div class="tile"><div class="v">${o.length}</div><div class="l">Clear dates (of ${n.nScenes} scenes)</div></div>
+     <div class="tile"><div class="v">${n.seasons.length}</div><div class="l">Season(s) detected</div></div>
+     <div class="tile"><div class="v">${n.pixels}</div><div class="l">10 m pixels in field</div></div>
+     <div class="tile"><div class="v">${fmt(v(mx).mean,2)}</div><div class="l">Max ${lab} · ${mx.date}</div></div>
+     <div class="tile"><div class="v">${n.seasons[0]?n.seasons[0].los:'–'}</div><div class="l">Season length d${n.seasons.length>1?' (1st)':''}</div></div>
+     <div class="tile"><div class="v">${n.rej.length}</div><div class="l">Dates rejected (cloud)</div></div>
+   </div>
+   <div class="card"><h4>${lab} time series (Sentinel-2, field mean)</h4><canvas id="chN" class="chart"></canvas></div>
+   ${seasonsHTML}
+   <div class="card"><h4>Observations</h4><div class="scroll"><table class="t">
+     <tr><th>Date</th>${VI_KEYS.map(k=>`<th>${VI[k].label}</th>`).join('')}<th>${lab} SD</th><th>Clear %</th><th>Pixels</th><th>Sat.</th></tr>
+     ${o.slice().reverse().map(r=>`<tr><td>${r.date}</td>${VI_KEYS.map(k=>`<td>${fmt(r.idx[k]?.mean,3)}</td>`).join('')}<td>${fmt(v(r).sd,3)}</td><td>${fmt(r.clearPct,0)}</td><td>${r.ok}</td><td>${esc((r.platform||'').replace('sentinel-','S'))}</td></tr>`).join('')}
+   </table></div></div>
+   ${n.errors?`<div class="status err">${n.errors} scene(s) could not be read and were skipped.</div>`:''}
+   <p class="hint">Sentinel-2 L2A surface reflectance (B04 red, B08 NIR; Collection 1 where available) from Earth Search on AWS. Cloud, shadow, cirrus, snow and no-data pixels (SCL) are removed; a date is kept when ≥ ${NDVI_OPT.minClear}% of the field is clear. EVI2 = 2.5(N−R)/(N+2.4R+1); NIRv = NDVI·N; SAVI = 1.5(N−R)/(N+R+0.5). Seasons: Whittaker smoother on the daily grid (${VEG.envelope?'upper-envelope reweighting, ':''}λ = ${VEG.lambda}); start/end where the curve crosses ${VEG.thr}% of the rise/fall amplitude (TIMESAT-style).</p>`;
+  if(!$('tb-ndvi').hidden) drawNdviChart();
+}
+function drawNdviChart(){
+  killChart('N'); const n=S.ndvi; if(!n||!n.done||!$('chN')) return;
+  const key=VEG.index, days=n.days||periodDays(n.start,n.end);
+  const m=Object.fromEntries(n.obs.filter(r=>r.idx&&r.idx[key]).map(r=>[r.date,r]));
+  const o=chartBase(); o.scales.x.ticks.maxTicksLimit=8; o.scales.x.ticks.autoSkip=true;
+  o.scales.y={min:VI[key].min,max:VI[key].max,title:{display:true,text:VI[key].label,color:TICK},ticks:{color:TICK},grid:{color:GRID}};
+  o.plugins.tooltip={callbacks:{label:c=>{ if(c.dataset.label==='Smoothed') return c.raw!=null?`Smoothed ${(+c.raw).toFixed(3)}`:''; if(c.dataset.label!=='Observed') return '';
+    const r=m[days[c.dataIndex]];return r?`${VI[key].label} ${r.idx[key].mean.toFixed(3)} ± ${r.idx[key].sd.toFixed(3)} (${r.ok} px, ${r.clearPct.toFixed(0)}% clear)`:'';}}};
+  o.plugins.legend={labels:{color:'#33414e',boxWidth:10,font:{size:10.5},filter:i=>i.text!=='P90'}};
+  S.charts.N=new Chart($('chN'),{type:'line',plugins:[seasonPlugin],data:{labels:days,datasets:[
+    {label:'P90',data:days.map(d=>m[d]?.idx[key].p90??null),borderColor:'transparent',pointRadius:0,spanGaps:true,fill:false},
+    {label:'P10–P90',data:days.map(d=>m[d]?.idx[key].p10??null),borderColor:'transparent',backgroundColor:'#5ad19a33',pointRadius:0,spanGaps:true,fill:'-1'},
+    {label:'Smoothed',data:n.smooth||days.map(()=>null),borderColor:'#0b4f8a',pointRadius:0,borderWidth:2,spanGaps:false},
+    {label:'Observed',data:days.map(d=>m[d]?.idx[key].mean??null),borderColor:'transparent',backgroundColor:'#1e8e5a',pointRadius:3,pointHoverRadius:5,showLine:false,spanGaps:true}]},
+    options:o});
+}
+function exportNdviCSV(){
+  const n=S.ndvi,f=S.field;
+  const head=['date',...VI_KEYS.flatMap(k=>[k+'_mean',k+'_sd',k+'_p10',k+'_p90']),'clear_pct','clear_pixels','field_pixels','scene_cloud_pct','platform','scene_id','status'];
+  const rows=[head];
+  [...n.obs.map(r=>({...r,st:'kept'})),...n.rej.map(r=>({...r,st:'rejected_cloud'}))].sort((a,b)=>a.date<b.date?-1:1).forEach(r=>
+    rows.push([r.date,...VI_KEYS.flatMap(k=>{const s=r.idx&&r.idx[k];return s?[s.mean.toFixed(4),s.sd.toFixed(4),s.p10.toFixed(4),s.p90.toFixed(4)]:['','','',''];}),
+      r.clearPct?.toFixed(1),r.ok,r.tot,r.sceneCloud,r.platform,r.id,r.st]));
+  downloadText(`vegindex_field_${String(f.id).padStart(7,'0')}_${n.start}_${n.end}.csv`,toCSV(rows));
+}
+function exportSeasonCSV(){
+  const n=S.ndvi,f=S.field,w=ul('water');
+  const rows=[['field_id','crop_class','index','threshold_pct','smoothing_lambda','season','sos','pos','eos','length_days','peak','base','amplitude','greenup_per10d','senescence_per10d','integral','sos_at_period_edge','eos_at_period_edge','et0_'+w,'rain_'+w,'gdd','climate_coverage_pct']];
+  n.seasons.forEach((s,i)=>{const c=seasonClimate(s);
+    rows.push([String(f.id).padStart(7,'0'),CROPS[f.c].code,VI[VEG.index].label,VEG.thr,VEG.lambda,i+1,s.sos,s.pos,s.eos,s.los,s.peak.toFixed(4),s.base.toFixed(4),s.amp.toFixed(4),
+      s.greenup?.toFixed(4),s.senesc?.toFixed(4),s.integral.toFixed(3),s.sosOpen,s.eosOpen,
+      c?(+cv('water',c.et0).toFixed(2)):'',c?(+cv('water',c.rain).toFixed(2)):'',c?(+cv('gdd',c.gdd).toFixed(1)):'',c?(100*c.cover).toFixed(0):'']);});
+  downloadText(`seasons_field_${String(f.id).padStart(7,'0')}_${n.start}_${n.end}.csv`,toCSV(rows));
 }
 
 /* ===================== Boot ===================== */
