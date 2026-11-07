@@ -19,6 +19,10 @@ header{height:48px;display:flex;align-items:center;gap:12px;padding:0 14px;borde
 header h1{font-size:17px;margin:0;font-weight:700;letter-spacing:.2px;color:#0b4f8a}
 header .sub{color:var(--mut);font-size:11.5px}
 header .ttl{display:flex;flex-direction:column;line-height:1.15}
+.seg{margin-left:auto;display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:5px 12px;background:var(--panel)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.act{background:var(--acc);color:#fff}
 #app{display:grid;grid-template-columns:290px 1fr 440px;height:calc(100% - 48px)}
 #app.noinfo{grid-template-columns:290px 1fr 0}
 aside{background:var(--panel);overflow:auto;border-right:1px solid var(--line)}
@@ -86,6 +90,7 @@ a{color:var(--acc)}
 <body>
 <header>
   <div class="ttl"><h1>CAtlas</h1><span class="sub">Developed by UCD Advanced Irrigation Lab</span></div>
+  <div class="seg" id="unitSeg" title="Unit system"><button data-u="met">Metric</button><button data-u="imp">Imperial</button></div>
 </header>
 <div id="app" class="noinfo">
   <aside id="side">
@@ -96,7 +101,7 @@ a{color:var(--acc)}
         <button id="selAll">Show all</button>
         <button id="selNone">Clear</button>
       </div>
-      <div class="hint">Click one or more crop types to highlight them; all other fields are dimmed. Acreage shown for the selected county (or statewide).</div>
+      <div class="hint">Click one or more crop types to highlight them; all other fields are dimmed. Area shown for the selected county (or statewide).</div>
       <div style="margin-top:10px">
         <div class="row small mut"><span>Dimmed field opacity</span><span id="dimv" style="flex:0">0.06</span></div>
         <input type="range" id="dim" min="0" max="0.5" step="0.01" value="0.06">
@@ -4530,7 +4535,29 @@ const SDA_URL = 'https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest';
 const POWER_URL = 'https://power.larc.nasa.gov/api/temporal/daily/point';
 
 const S = { selected:new Set(), dim:0.06, op:0.75, county:'', countyOnly:false,
-  field:null, soil:null, comp:0, climate:null, rootDepth:100, charts:{} };
+  field:null, soil:null, comp:0, climate:null, rootDepth:100, charts:{}, units:'met' };
+try{ const u=localStorage.getItem('catlas-units'); if(u==='imp'||u==='met') S.units=u; }catch(e){}
+/* ===================== Units (internal values are always SI) ===================== */
+const UNITS={
+  area :{met:['ha',v=>v*0.404686],     imp:['ac',v=>v]},          // source: acres
+  dist :{met:['km',v=>v],              imp:['mi',v=>v*0.621371]},
+  elev :{met:['m',v=>v],               imp:['ft',v=>v*3.28084]},
+  depth:{met:['cm',v=>v],              imp:['in',v=>v/2.54]},
+  water:{met:['mm',v=>v],              imp:['in',v=>v/25.4]},
+  kh   :{met:['mm/h',v=>v],            imp:['in/h',v=>v/25.4]},
+  kday :{met:['cm/d',v=>v],            imp:['in/d',v=>v/2.54]},
+  temp :{met:['°C',v=>v],              imp:['°F',v=>v*1.8+32]},
+  wind :{met:['m/s',v=>v],             imp:['mph',v=>v*2.23694]},
+  rad  :{met:['MJ/m²/d',v=>v],         imp:['ly/d',v=>v*23.9006]},
+  gdd  :{met:['°C·d',v=>v],            imp:['°F·d',v=>v*1.8]},
+  tawr :{met:['mm/m',v=>v],            imp:['in/ft',v=>v*0.3048/25.4]}
+};
+const IMP=()=>S.units==='imp';
+const cv=(k,v)=>(v==null||!isFinite(v))?null:UNITS[k][S.units][1](v);
+const ul=k=>UNITS[k][S.units][0];
+const fu=(k,v,dm,di)=>fmt(cv(k,v),IMP()?(di??dm):dm);
+const ksatSsurgo=um=>um==null?null:(IMP()?um*3.6/25.4:um); // SSURGO Ksat is µm/s
+const ksatSsurgoUnit=()=>IMP()?'in/h':'µm/s';
 
 /* ===================== Utilities ===================== */
 const $ = id => document.getElementById(id);
@@ -4584,7 +4611,7 @@ const BASEMAPS = {
 };
 const protocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', protocol.tile);
-let map, PM;
+let map, PM, scaleCtl;
 
 function cropColorExpr(){
   const e=['match',['get','c']]; CROPS.forEach((c,i)=>e.push(i,c.color)); e.push('#888'); return e;
@@ -4636,7 +4663,7 @@ async function initMap(){
     maxZoom:18, hash:false, attributionControl:{compact:true}
   });
   map.addControl(new maplibregl.NavigationControl({visualizePitch:false}),'top-right');
-  map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-right');
+  scaleCtl=new maplibregl.ScaleControl({unit:IMP()?'imperial':'metric'}); map.addControl(scaleCtl,'bottom-right');
   map.on('load',()=>{ $('loading').remove(); applyStyle(); });
   map.on('error',e=>console.warn('map error',e && e.error && e.error.message));
 
@@ -4649,7 +4676,7 @@ async function initMap(){
     if(f.length){const p=f[0].properties;map.getCanvas().style.cursor='pointer';
       map.setFilter('hover-line',['==',['id'],f[0].id]);
       hb.style.display='block';
-      hb.innerHTML=`<span class="chip" style="background:${CROPS[p.c].color};color:#000">${CROPS[p.c].code}</span>${esc(CROPS[p.c].name)} · ${fmt(p.a,1)} ac · ${esc(COUNTIES[p.k]?.n||'')}`;
+      hb.innerHTML=`<span class="chip" style="background:${CROPS[p.c].color};color:#000">${CROPS[p.c].code}</span>${esc(CROPS[p.c].name)} · ${fu('area',p.a,1)} ${ul('area')} · ${esc(COUNTIES[p.k]?.n||'')}`;
     }else{map.getCanvas().style.cursor='';hb.style.display='none';map.setFilter('hover-line',['==',['id'],-1]);}
   });
   map.on('mouseout',()=>{hb.style.display='none';});
@@ -4673,7 +4700,7 @@ function showStation(id,fromMap){
   if(!fromMap) map.flyTo({center:[s.lon,s.lat],zoom:Math.max(map.getZoom(),11)});
   if(stnPopup) stnPopup.remove();
   stnPopup=new maplibregl.Popup({offset:10}).setLngLat([s.lon,s.lat]).setHTML(
-    `<b>CIMIS station #${s.id}</b><br>${esc(s.n)}<br><span class="mut">Lat</span> ${s.lat.toFixed(4)} · <span class="mut">Lon</span> ${s.lon.toFixed(4)}<br><span class="mut">Elevation</span> ${fmt(s.el,1)} m · <span class="mut">Active</span> ${esc(s.act||'Y')}<br><a href="https://cimis.water.ca.gov/Stations.aspx" target="_blank" rel="noopener">CIMIS station list ↗</a>`).addTo(map);
+    `<b>CIMIS station #${s.id}</b><br>${esc(s.n)}<br><span class="mut">Lat</span> ${s.lat.toFixed(4)} · <span class="mut">Lon</span> ${s.lon.toFixed(4)}<br><span class="mut">Elevation</span> ${fu('elev',s.el,1,0)} ${ul('elev')} · <span class="mut">Active</span> ${esc(s.act||'Y')}<br><a href="https://cimis.water.ca.gov/Stations.aspx" target="_blank" rel="noopener">CIMIS station list ↗</a>`).addTo(map);
 }
 
 /* ===================== Sidebar ===================== */
@@ -4682,7 +4709,7 @@ function renderCropList(){
   const ac=countyAcres(); const tot=ac.reduce((a,b)=>a+b,0);
   $('croplist').innerHTML=CROPS.map((c,i)=>{
     const cls=S.selected.size?(S.selected.has(i)?'on':'off'):'';
-    return `<div class="crop ${cls}" data-i="${i}"><span class="sw" style="background:${c.color}"></span><span class="nm">${esc(c.name)}</span><span class="ac">${(ac[i]/1000).toFixed(ac[i]<10000?1:0)}k ac · ${tot?(100*ac[i]/tot).toFixed(1):0}%</span></div>`;}).join('');
+    return `<div class="crop ${cls}" data-i="${i}"><span class="sw" style="background:${c.color}"></span><span class="nm">${esc(c.name)}</span><span class="ac">${(cv('area',ac[i])/1000).toFixed(cv('area',ac[i])<10000?1:0)}k ${ul('area')} · ${tot?(100*ac[i]/tot).toFixed(1):0}%</span></div>`;}).join('');
   $('selcount').textContent=S.selected.size?`${S.selected.size} selected`:'all shown';
   $('croplist').querySelectorAll('.crop').forEach(el=>el.onclick=()=>{
     const i=+el.dataset.i; S.selected.has(i)?S.selected.delete(i):S.selected.add(i);
@@ -4714,7 +4741,20 @@ function initSidebar(){
   $('lyCimisLbl').onchange=e=>vis(['cimis-lbl'],e.target.checked&&$('lyCimis').checked);
   $('basemap').onchange=e=>setBasemap(e.target.value);
   $('stnq').oninput=e=>renderStations(e.target.value);
+  $('unitSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>setUnits(b.dataset.u));
+  markUnits();
   $('tabs').querySelectorAll('button').forEach(b=>b.onclick=()=>showTab(b.dataset.t));
+}
+function markUnits(){ $('unitSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('act',b.dataset.u===S.units)); }
+function setUnits(u){
+  if(u===S.units) return; S.units=u; markUnits();
+  try{localStorage.setItem('catlas-units',u);}catch(e){}
+  if(scaleCtl) scaleCtl.setUnit(IMP()?'imperial':'metric');
+  if(stnPopup){stnPopup.remove();stnPopup=null;}
+  renderCropList();
+  if(S.field) renderField();
+  if(S.soil){renderSoil();renderHyd();}
+  if(S.climate) renderClimate();
 }
 function showTab(t){
   $('tabs').querySelectorAll('button').forEach(b=>b.classList.toggle('act',b.dataset.t===t));
@@ -4733,7 +4773,7 @@ function selectField(p,ll){
   S.field={id:p.id,c:p.c,a:p.a,k:p.k,lat:ll.lat,lon:ll.lng}; S.soil=null; S.climate=null; S.comp=0;
   map.setFilter('sel-line',['==',['id'],p.id]);
   map.getSource('sel').setData({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Point',coordinates:[ll.lng,ll.lat]}}]});
-  renderField();
+  renderField(); showTab('field');
   $('tb-soil').innerHTML='<div class="status">Querying USDA Soil Data Access (SSURGO)…</div>';
   $('tb-hyd').innerHTML='<div class="status">Waiting for SSURGO horizons…</div>';
   $('tb-clim').innerHTML=climControlsHTML()+'<div id="climout"></div>';
@@ -4749,18 +4789,17 @@ function renderField(){
    <div class="kv">
      <div>DWR class</div><div>${c.code}</div>
      <div>Field UniqueID</div><div>${esc(String(f.id).padStart(7,'0'))}</div>
-     <div>Area</div><div>${fmt(f.a,2)} ac (${fmt(f.a*0.404686,2)} ha)</div>
+     <div>Area</div><div>${IMP()?`${fmt(f.a,2)} ac (${fmt(f.a*0.404686,2)} ha)`:`${fmt(f.a*0.404686,2)} ha (${fmt(f.a,2)} ac)`}</div>
      <div>County</div><div>${esc(COUNTIES[f.k]?.n||'–')}</div>
      <div>Query point</div><div>${f.lat.toFixed(5)}, ${f.lon.toFixed(5)}</div>
    </div>
    <div class="card"><h4>Nearest CIMIS stations</h4>
-     ${ns.map(s=>`<div class="stn" data-id="${s.id}"><span>#${s.id} ${esc(s.n)}</span><span class="mut">${fmt(s.d,1)} km · ${fmt(s.el,0)} m</span></div>`).join('')}
+     ${ns.map(s=>`<div class="stn" data-id="${s.id}"><span>#${s.id} ${esc(s.n)}</span><span class="mut">${fu('dist',s.d,1)} ${ul('dist')} · ${fu('elev',s.el,0)} ${ul('elev')}</span></div>`).join('')}
    </div>
    <div class="btnrow"><button id="goSoil" class="pri">Soil profile →</button><button id="goHyd">Hydraulics →</button><button id="goClim">Daily climate →</button></div>
    <p class="hint">Soil and hydraulic properties are queried at the clicked point (the SSURGO map unit under it). Climate is NASA POWER at the same point (~0.5° × 0.625° MERRA-2 / 1° CERES grid).</p>`;
   $('tb-field').querySelectorAll('.stn').forEach(el=>el.onclick=()=>showStation(+el.dataset.id,false));
   $('goSoil').onclick=()=>showTab('soil'); $('goHyd').onclick=()=>showTab('hyd'); $('goClim').onclick=()=>showTab('clim');
-  showTab('field');
 }
 
 /* ===================== SSURGO via Soil Data Access ===================== */
@@ -4834,12 +4873,12 @@ function renderSoil(){
    </div>
    ${c.hz.length?`
    <div class="card"><h4>Physical properties by horizon</h4><div class="scroll"><table class="t">
-     <tr><th>Hzn</th><th>Depth cm</th><th>Texture</th><th>Sand %</th><th>Silt %</th><th>Clay %</th><th>OM %</th><th>ρb g/cm³</th><th>Frag %</th></tr>
-     ${c.hz.map(h=>`<tr><td>${esc(h.name||'')}</td><td>${fmt(h.top,0)}–${fmt(h.bot,0)}</td><td title="${esc(h.texture||'')}">${esc(Edaphix.textureClass(h.sand,h.clay)||h.texture||'–')}</td><td>${fmt(h.sand,1)}</td><td>${fmt(h.silt,1)}</td><td>${fmt(h.clay,1)}</td><td>${fmt(h.om,2)}</td><td>${fmt(h.db,2)}</td><td>${fmt(h.frag,0)}</td></tr>`).join('')}
+     <tr><th>Hzn</th><th>Depth ${ul('depth')}</th><th>Texture</th><th>Sand %</th><th>Silt %</th><th>Clay %</th><th>OM %</th><th>ρb g/cm³</th><th>Frag %</th></tr>
+     ${c.hz.map(h=>`<tr><td>${esc(h.name||'')}</td><td>${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)}</td><td title="${esc(h.texture||'')}">${esc(Edaphix.textureClass(h.sand,h.clay)||h.texture||'–')}</td><td>${fmt(h.sand,1)}</td><td>${fmt(h.silt,1)}</td><td>${fmt(h.clay,1)}</td><td>${fmt(h.om,2)}</td><td>${fmt(h.db,2)}</td><td>${fmt(h.frag,0)}</td></tr>`).join('')}
    </table></div></div>
    <div class="card"><h4>SSURGO-reported hydraulic &amp; chemical properties</h4><div class="scroll"><table class="t">
-     <tr><th>Depth cm</th><th>θ33 %v</th><th>θ1500 %v</th><th>AWC cm/cm</th><th>Ksat µm/s</th><th>pH</th><th>EC dS/m</th><th>CEC</th><th>CaCO₃ %</th><th>SAR</th></tr>
-     ${c.hz.map(h=>`<tr><td>${fmt(h.top,0)}–${fmt(h.bot,0)}</td><td>${fmt(h.w33,1)}</td><td>${fmt(h.w1500,1)}</td><td>${fmt(h.awc,2)}</td><td>${fmt(h.ksat,2)}</td><td>${fmt(h.ph,1)}</td><td>${fmt(h.ec,1)}</td><td>${fmt(h.cec,1)}</td><td>${fmt(h.caco3,0)}</td><td>${fmt(h.sar,0)}</td></tr>`).join('')}
+     <tr><th>Depth ${ul('depth')}</th><th>θ33 %v</th><th>θ1500 %v</th><th>AWC ${IMP()?'in/in':'cm/cm'}</th><th>Ksat ${ksatSsurgoUnit()}</th><th>pH</th><th>EC dS/m</th><th>CEC</th><th>CaCO₃ %</th><th>SAR</th></tr>
+     ${c.hz.map(h=>`<tr><td>${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)}</td><td>${fmt(h.w33,1)}</td><td>${fmt(h.w1500,1)}</td><td>${fmt(h.awc,2)}</td><td>${fmt(ksatSsurgo(h.ksat),2)}</td><td>${fmt(h.ph,1)}</td><td>${fmt(h.ec,1)}</td><td>${fmt(h.cec,1)}</td><td>${fmt(h.caco3,0)}</td><td>${fmt(h.sar,0)}</td></tr>`).join('')}
    </table></div></div>
    <div class="btnrow"><button id="soilCsv">Export horizons CSV</button><button id="toHyd" class="pri">Estimated hydraulics →</button></div>`
    :'<div class="status">This component has no horizon data in SSURGO (common for minor/miscellaneous components). Pick another component above.</div>'}
@@ -4850,15 +4889,17 @@ function renderSoil(){
 }
 function exportSoilCSV(){
   const {mu,comps}=S.soil, c=comps[S.comp];
-  const head=['mukey','muname','component','comppct','horizon','top_cm','bottom_cm','sand_pct','silt_pct','clay_pct','om_pct','db_gcm3','texture_class',
-    'ssurgo_theta33_pctv','ssurgo_theta1500_pctv','ssurgo_awc_cmcm','ssurgo_ksat_ums','pH','EC_dSm','CEC','CaCO3_pct',
-    'ptf_thetaS','ptf_FC33','ptf_WP1500','ptf_PAW','ptf_Ksat_mmh','ptf_lambda','ptf_psiE_kPa','vg_theta_r','vg_theta_s','vg_alpha_1cm','vg_n'];
+  const dU=IMP()?'in':'cm', kU=IMP()?'inh':'mmh';
+  const head=['mukey','muname','component','comppct','horizon','top_'+dU,'bottom_'+dU,'sand_pct','silt_pct','clay_pct','om_pct','db_gcm3','texture_class',
+    'ssurgo_theta33_pctv','ssurgo_theta1500_pctv','ssurgo_awc_ratio','ssurgo_ksat_'+(IMP()?'inh':'ums'),'pH','EC_dSm','CEC','CaCO3_pct',
+    'ptf_thetaS','ptf_FC33','ptf_WP1500','ptf_PAW','ptf_Ksat_'+kU,'ptf_lambda','ptf_psiE_kPa','vg_theta_r','vg_theta_s','vg_alpha_1cm','vg_n','vg_Ks_'+(IMP()?'ind':'cmd')];
   const rows=[head];
   c.hz.forEach(h=>{const p=h.ptf||{}; const v=p.vg||{};
-    rows.push([mu.mukey,mu.muname,c.compname,c.pct,h.name,h.top,h.bot,h.sand,h.silt,h.clay,h.om,h.db,Edaphix.textureClass(h.sand,h.clay),
-      h.w33,h.w1500,h.awc,h.ksat,h.ph,h.ec,h.cec,h.caco3,
-      p.thS?.toFixed(4),p.th33?.toFixed(4),p.th1500?.toFixed(4),p.paw?.toFixed(4),p.ks?.toFixed(3),p.lambda?.toFixed(4),p.psiE?.toFixed(2),
-      v.tr?.toFixed(4),v.ts?.toFixed(4),v.alpha?.toFixed(5),v.n?.toFixed(4)]);});
+    const r4=x=>x==null?null:+x.toFixed(4);
+    rows.push([mu.mukey,mu.muname,c.compname,c.pct,h.name,r4(cv('depth',h.top)),r4(cv('depth',h.bot)),h.sand,h.silt,h.clay,h.om,h.db,Edaphix.textureClass(h.sand,h.clay),
+      h.w33,h.w1500,h.awc,r4(ksatSsurgo(h.ksat)),h.ph,h.ec,h.cec,h.caco3,
+      p.thS?.toFixed(4),p.th33?.toFixed(4),p.th1500?.toFixed(4),p.paw?.toFixed(4),r4(cv('kh',p.ks)),p.lambda?.toFixed(4),p.psiE?.toFixed(2),
+      v.tr?.toFixed(4),v.ts?.toFixed(4),v.alpha?.toFixed(5),v.n?.toFixed(4),r4(cv('kday',v.ks_cmd))]);});
   downloadText(`soil_${mu.mukey}_${c.compname.replace(/\W+/g,'_')}.csv`,toCSV(rows));
 }
 
@@ -4967,33 +5008,33 @@ function renderHyd(){
   if(!hz.length){el.innerHTML=compSelectHTML('hyd')+'<div class="status">No horizons with particle-size data for this component.</div>';bindCompSel('hyd');return;}
   const rz=rootZone(c.hz,S.rootDepth);
   el.innerHTML=`${compSelectHTML('hyd')}
-   <div class="row"><span class="mut" style="flex:0 0 auto">Root-zone depth</span><input type="number" id="rzd" min="10" max="300" step="10" value="${S.rootDepth}" style="max-width:90px"><span class="mut">cm</span></div>
+   <div class="row"><span class="mut" style="flex:0 0 auto">Root-zone depth</span><input type="number" id="rzd" min="${IMP()?4:10}" max="${IMP()?120:300}" step="${IMP()?2:10}" value="${IMP()?Math.round(S.rootDepth/2.54):S.rootDepth}" style="max-width:90px"><span class="mut">${ul('depth')}</span></div>
    ${rz?`<div class="tiles">
-     <div class="tile"><div class="v">${fmt(rz.TAW,0)}</div><div class="l">TAW mm (FC−WP)</div></div>
-     <div class="tile"><div class="v">${fmt(rz.FC,0)}</div><div class="l">Field capacity mm</div></div>
-     <div class="tile"><div class="v">${fmt(rz.WP,0)}</div><div class="l">Wilting point mm</div></div>
-     <div class="tile"><div class="v">${fmt(rz.SAT,0)}</div><div class="l">Saturation mm</div></div>
-     <div class="tile"><div class="v">${fmt(rz.ksGeo,1)}</div><div class="l">Ksat mm/h (geo-mean)</div></div>
-     <div class="tile"><div class="v">${fmt(rz.TAW/rz.depth*10,0)}</div><div class="l">TAW mm/m over ${fmt(rz.depth,0)} cm</div></div>
+     <div class="tile"><div class="v">${fu('water',rz.TAW,0,2)}</div><div class="l">TAW ${ul('water')} (FC−WP)</div></div>
+     <div class="tile"><div class="v">${fu('water',rz.FC,0,2)}</div><div class="l">Field capacity ${ul('water')}</div></div>
+     <div class="tile"><div class="v">${fu('water',rz.WP,0,2)}</div><div class="l">Wilting point ${ul('water')}</div></div>
+     <div class="tile"><div class="v">${fu('water',rz.SAT,0,2)}</div><div class="l">Saturation ${ul('water')}</div></div>
+     <div class="tile"><div class="v">${fu('kh',rz.ksGeo,1,2)}</div><div class="l">Ksat ${ul('kh')} (geo-mean)</div></div>
+     <div class="tile"><div class="v">${fu('tawr',rz.TAW/rz.depth*100,0,2)}</div><div class="l">TAW ${ul('tawr')} over ${fu('depth',rz.depth,0)} ${ul('depth')}</div></div>
    </div>`:''}
    <div class="card"><h4>Estimated hydraulic properties by horizon</h4><div class="scroll"><table class="t">
-     <tr><th>Depth cm</th><th>θs</th><th>θFC₃₃</th><th>θWP₁₅₀₀</th><th>PAW</th><th>Ksat mm/h</th><th>λ</th><th>ψe kPa</th><th>ρb</th></tr>
-     ${hz.map(h=>{const p=h.ptf;return `<tr><td>${fmt(h.top,0)}–${fmt(h.bot,0)}</td><td>${fmt(p.thS,3)}</td><td>${fmt(p.th33,3)}</td><td>${fmt(p.th1500,3)}</td><td>${fmt(p.paw,3)}</td><td>${fmt(p.ks,1)}</td><td>${fmt(p.lambda,3)}</td><td>${fmt(p.psiE,1)}</td><td>${fmt(p.rho,2)}</td></tr>`;}).join('')}
+     <tr><th>Depth ${ul('depth')}</th><th>θs</th><th>θFC₃₃</th><th>θWP₁₅₀₀</th><th>PAW</th><th>Ksat ${ul('kh')}</th><th>λ</th><th>ψe kPa</th><th>ρb</th></tr>
+     ${hz.map(h=>{const p=h.ptf;return `<tr><td>${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)}</td><td>${fmt(p.thS,3)}</td><td>${fmt(p.th33,3)}</td><td>${fmt(p.th1500,3)}</td><td>${fmt(p.paw,3)}</td><td>${fu('kh',p.ks,1,2)}</td><td>${fmt(p.lambda,3)}</td><td>${fmt(p.psiE,1)}</td><td>${fmt(p.rho,2)}</td></tr>`;}).join('')}
    </table></div></div>
    <div class="card"><h4>van Genuchten–Mualem parameters (fitted to PTF curve)</h4><div class="scroll"><table class="t">
-     <tr><th>Depth cm</th><th>θr</th><th>θs</th><th>α 1/cm</th><th>n</th><th>Ks cm/d</th><th>fit RMSE</th></tr>
-     ${hz.map(h=>{const v=h.ptf.vg;return `<tr><td>${fmt(h.top,0)}–${fmt(h.bot,0)}</td><td>${fmt(v.tr,3)}</td><td>${fmt(v.ts,3)}</td><td>${fmt(v.alpha,4)}</td><td>${fmt(v.n,3)}</td><td>${fmt(v.ks_cmd,1)}</td><td>${fmt(v.rmse,4)}</td></tr>`;}).join('')}
+     <tr><th>Depth ${ul('depth')}</th><th>θr</th><th>θs</th><th>α 1/cm</th><th>n</th><th>Ks ${ul('kday')}</th><th>fit RMSE</th></tr>
+     ${hz.map(h=>{const v=h.ptf.vg;return `<tr><td>${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)}</td><td>${fmt(v.tr,3)}</td><td>${fmt(v.ts,3)}</td><td>${fmt(v.alpha,4)}</td><td>${fmt(v.n,3)}</td><td>${fu('kday',v.ks_cmd,1,2)}</td><td>${fmt(v.rmse,4)}</td></tr>`;}).join('')}
    </table></div></div>
    <div class="card"><h4>Water retention curves θ(ψ)</h4><canvas id="chRet" class="chart"></canvas></div>
    <div class="card"><h4>Unsaturated hydraulic conductivity K(θ)</h4><canvas id="chK" class="chart"></canvas></div>
    <div class="card"><h4>PTF vs SSURGO-reported</h4><div class="scroll"><table class="t">
-     <tr><th>Depth cm</th><th>FC PTF</th><th>FC SSURGO</th><th>WP PTF</th><th>WP SSURGO</th><th>Ksat PTF mm/h</th><th>Ksat SSURGO mm/h</th></tr>
-     ${hz.map(h=>`<tr><td>${fmt(h.top,0)}–${fmt(h.bot,0)}</td><td>${fmt(h.ptf.th33*100,1)}</td><td>${fmt(h.w33,1)}</td><td>${fmt(h.ptf.th1500*100,1)}</td><td>${fmt(h.w1500,1)}</td><td>${fmt(h.ptf.ks,1)}</td><td>${fmt(h.ksat!=null?h.ksat*3.6:null,1)}</td></tr>`).join('')}
+     <tr><th>Depth ${ul('depth')}</th><th>FC PTF %v</th><th>FC SSURGO %v</th><th>WP PTF %v</th><th>WP SSURGO %v</th><th>Ksat PTF ${ul('kh')}</th><th>Ksat SSURGO ${ul('kh')}</th></tr>
+     ${hz.map(h=>`<tr><td>${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)}</td><td>${fmt(h.ptf.th33*100,1)}</td><td>${fmt(h.w33,1)}</td><td>${fmt(h.ptf.th1500*100,1)}</td><td>${fmt(h.w1500,1)}</td><td>${fu('kh',h.ptf.ks,1,2)}</td><td>${fu('kh',h.ksat!=null?h.ksat*3.6:null,1,2)}</td></tr>`).join('')}
    </table></div></div>
    <div class="btnrow"><button id="hydCsv">Export hydraulic CSV</button></div>
    <p class="hint">Hydraulic properties estimated from SSURGO sand, clay, organic matter and bulk density (⅓ bar) using Saxton &amp; Rawls (2006) with density adjustment; van Genuchten parameters are a least-squares fit to that curve (h = 0.1–16,000 cm). Root-zone totals are depth-weighted and corrected for coarse fragments.</p>`;
   bindCompSel('hyd');
-  $('rzd').onchange=e=>{S.rootDepth=Math.max(10,Math.min(300,+e.target.value||100));renderHyd();};
+  $('rzd').onchange=e=>{const v=+e.target.value; S.rootDepth=Math.max(10,Math.min(300,(IMP()?v*2.54:v)||100));renderHyd();};
   $('hydCsv').onclick=exportSoilCSV;
   drawHydCharts(hz);
 }
@@ -5006,14 +5047,14 @@ const chartBase=()=>({responsive:true,maintainAspectRatio:false,animation:false,
 function drawHydCharts(hz){
   killChart('ret');killChart('k');
   const psis=[];for(let e=-1;e<=3.3;e+=0.05) psis.push(Math.pow(10,e)); // kPa 0.1..2000
-  const dsR=hz.map((h,i)=>({label:`${fmt(h.top,0)}–${fmt(h.bot,0)} cm`,data:psis.map(p=>({x:p,y:Edaphix.thetaOfPsi(h.ptf,p)})),
+  const dsR=hz.map((h,i)=>({label:`${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)} ${ul('depth')}`,data:psis.map(p=>({x:p,y:Edaphix.thetaOfPsi(h.ptf,p)})),
     borderColor:PALETTE[i%PALETTE.length],pointRadius:0,borderWidth:1.6,showLine:true}));
-  const o1=chartBase(); o1.scales.x={type:'logarithmic',title:{display:true,text:'Suction ψ (kPa)',color:TICK},ticks:{color:TICK},grid:{color:GRID}};
+  const o1=chartBase(); o1.scales.x={type:'logarithmic',title:{display:true,text:'Suction ψ (kPa = cbar)',color:TICK},ticks:{color:TICK},grid:{color:GRID}};
   o1.scales.y.title={display:true,text:'θ (m³/m³)',color:TICK};
   S.charts.ret=new Chart($('chRet'),{type:'scatter',data:{datasets:dsR},options:o1});
-  const dsK=hz.map((h,i)=>{const pts=[];for(let k=0;k<=60;k++){const th=h.ptf.th1500*0.8+(h.ptf.thS-h.ptf.th1500*0.8)*k/60;pts.push({x:th,y:Edaphix.kOfTheta(h.ptf,th)});}
-    return {label:`${fmt(h.top,0)}–${fmt(h.bot,0)} cm`,data:pts,borderColor:PALETTE[i%PALETTE.length],pointRadius:0,borderWidth:1.6,showLine:true};});
-  const o2=chartBase(); o2.scales.y={type:'logarithmic',title:{display:true,text:'K (mm/h)',color:TICK},ticks:{color:TICK},grid:{color:GRID}};
+  const dsK=hz.map((h,i)=>{const pts=[];for(let k=0;k<=60;k++){const th=h.ptf.th1500*0.8+(h.ptf.thS-h.ptf.th1500*0.8)*k/60;pts.push({x:th,y:cv('kh',Edaphix.kOfTheta(h.ptf,th))});}
+    return {label:`${fu('depth',h.top,0,1)}–${fu('depth',h.bot,0,1)} ${ul('depth')}`,data:pts,borderColor:PALETTE[i%PALETTE.length],pointRadius:0,borderWidth:1.6,showLine:true};});
+  const o2=chartBase(); o2.scales.y={type:'logarithmic',title:{display:true,text:`K (${ul('kh')})`,color:TICK},ticks:{color:TICK},grid:{color:GRID}};
   o2.scales.x.title={display:true,text:'θ (m³/m³)',color:TICK};
   S.charts.k=new Chart($('chK'),{type:'scatter',data:{datasets:dsK},options:o2});
 }
@@ -5089,19 +5130,19 @@ function renderClimate(){
   const ns=nearestStations(S.climate.lat,S.climate.lon,1)[0];
   $('climout').innerHTML=`
    <div class="tiles">
-     <div class="tile"><div class="v">${fmt(sum('PRECTOTCORR'),0)}</div><div class="l">Precip mm</div></div>
-     <div class="tile"><div class="v">${fmt(sum('ET0'),0)}</div><div class="l">ET₀ mm (FAO-56)</div></div>
-     <div class="tile"><div class="v">${fmt(sum('ET0')-sum('PRECTOTCORR'),0)}</div><div class="l">ET₀ − P mm</div></div>
-     <div class="tile"><div class="v">${fmt(mean('T2M'),1)}</div><div class="l">Mean T °C</div></div>
-     <div class="tile"><div class="v">${fmt(tx,1)} / ${fmt(tn,1)}</div><div class="l">Max / min T °C</div></div>
-     <div class="tile"><div class="v">${fmt(sum('GDD10'),0)}</div><div class="l">GDD base 10 °C</div></div>
+     <div class="tile"><div class="v">${fu('water',sum('PRECTOTCORR'),0,1)}</div><div class="l">Precip ${ul('water')}</div></div>
+     <div class="tile"><div class="v">${fu('water',sum('ET0'),0,1)}</div><div class="l">ET₀ ${ul('water')} (FAO-56)</div></div>
+     <div class="tile"><div class="v">${fu('water',sum('ET0')-sum('PRECTOTCORR'),0,1)}</div><div class="l">ET₀ − P ${ul('water')}</div></div>
+     <div class="tile"><div class="v">${fu('temp',mean('T2M'),1)}</div><div class="l">Mean T ${ul('temp')}</div></div>
+     <div class="tile"><div class="v">${fu('temp',tx,1)} / ${fu('temp',tn,1)}</div><div class="l">Max / min T ${ul('temp')}</div></div>
+     <div class="tile"><div class="v">${fu('gdd',sum('GDD10'),0)}</div><div class="l">GDD base ${IMP()?'50 °F':'10 °C'}</div></div>
    </div>
-   <div class="card"><h4>Air temperature (°C)</h4><canvas id="chT" class="chart"></canvas></div>
-   <div class="card"><h4>Reference ET₀ &amp; rainfall (mm/day)</h4><canvas id="chP" class="chart"></canvas></div>
-   <div class="card"><h4>Solar radiation (MJ/m²/day) &amp; RH (%)</h4><canvas id="chR" class="chart"></canvas></div>
+   <div class="card"><h4>Air temperature (${ul('temp')})</h4><canvas id="chT" class="chart"></canvas></div>
+   <div class="card"><h4>Reference ET₀ &amp; rainfall (${ul('water')}/day)</h4><canvas id="chP" class="chart"></canvas></div>
+   <div class="card"><h4>Solar radiation (${ul('rad')}) &amp; RH (%)</h4><canvas id="chR" class="chart"></canvas></div>
    <div class="card"><h4>Daily data</h4><div class="scroll"><table class="t">
-     <tr><th>Date</th><th>Tmax</th><th>Tmin</th><th>RH %</th><th>u₂ m/s</th><th>Rs MJ</th><th>P mm</th><th>ET₀ mm</th></tr>
-     ${rows.slice().reverse().map(r=>`<tr><td>${r.date}</td><td>${fmt(r.T2M_MAX,1)}</td><td>${fmt(r.T2M_MIN,1)}</td><td>${fmt(r.RH2M,0)}</td><td>${fmt(r.WS2M,1)}</td><td>${fmt(r.ALLSKY_SFC_SW_DWN,1)}</td><td>${fmt(r.PRECTOTCORR,1)}</td><td>${fmt(r.ET0,2)}</td></tr>`).join('')}
+     <tr><th>Date</th><th>Tmax ${ul('temp')}</th><th>Tmin ${ul('temp')}</th><th>RH %</th><th>u₂ ${ul('wind')}</th><th>Rs ${ul('rad')}</th><th>P ${ul('water')}</th><th>ET₀ ${ul('water')}</th></tr>
+     ${rows.slice().reverse().map(r=>`<tr><td>${r.date}</td><td>${fu('temp',r.T2M_MAX,1)}</td><td>${fu('temp',r.T2M_MIN,1)}</td><td>${fmt(r.RH2M,0)}</td><td>${fu('wind',r.WS2M,1)}</td><td>${fu('rad',r.ALLSKY_SFC_SW_DWN,1,0)}</td><td>${fu('water',r.PRECTOTCORR,1,2)}</td><td>${fu('water',r.ET0,2,3)}</td></tr>`).join('')}
    </table></div></div>
    <p class="hint">Source: NASA POWER daily API (community AG, local solar time). ET₀ computed here with FAO-56 Penman–Monteith from Tmax/Tmin, dew point, 2 m wind and all-sky shortwave. Recent days may be missing until POWER finalizes them.</p>`;
   drawClimCharts();
@@ -5111,26 +5152,29 @@ function drawClimCharts(){
   const r=S.climate.rows, L=r.map(x=>x.date);
   const base=()=>{const o=chartBase();o.scales.x.ticks.maxTicksLimit=8;o.interaction={mode:'index',intersect:false};o.plugins.tooltip.mode='index';return o;};
   S.charts.T=new Chart($('chT'),{type:'line',data:{labels:L,datasets:[
-    {label:'Tmax',data:r.map(x=>x.T2M_MAX),borderColor:'#e15759',pointRadius:0,borderWidth:1.2},
-    {label:'Tmean',data:r.map(x=>x.T2M),borderColor:'#c9a227',pointRadius:0,borderWidth:1},
-    {label:'Tmin',data:r.map(x=>x.T2M_MIN),borderColor:'#1a73e8',pointRadius:0,borderWidth:1.2}]},options:base()});
+    {label:'Tmax',data:r.map(x=>cv('temp',x.T2M_MAX)),borderColor:'#e15759',pointRadius:0,borderWidth:1.2},
+    {label:'Tmean',data:r.map(x=>cv('temp',x.T2M)),borderColor:'#c9a227',pointRadius:0,borderWidth:1},
+    {label:'Tmin',data:r.map(x=>cv('temp',x.T2M_MIN)),borderColor:'#1a73e8',pointRadius:0,borderWidth:1.2}]},options:base()});
   const oP=base();
-  oP.scales.y={position:'left',min:0,title:{display:true,text:'ET₀ (mm/day)',color:'#1e8e5a'},ticks:{color:'#1e8e5a'},grid:{color:GRID}};
-  oP.scales.y2={position:'right',min:0,reverse:false,title:{display:true,text:'Rainfall (mm/day)',color:'#3a6ea5'},ticks:{color:'#3a6ea5'},grid:{drawOnChartArea:false}};
+  oP.scales.y={position:'left',min:0,title:{display:true,text:`ET₀ (${ul('water')}/day)`,color:'#1e8e5a'},ticks:{color:'#1e8e5a'},grid:{color:GRID}};
+  oP.scales.y2={position:'right',min:0,reverse:false,title:{display:true,text:`Rainfall (${ul('water')}/day)`,color:'#3a6ea5'},ticks:{color:'#3a6ea5'},grid:{drawOnChartArea:false}};
   S.charts.P=new Chart($('chP'),{data:{labels:L,datasets:[
-    {type:'line',label:'ET₀ (FAO-56)',data:r.map(x=>x.ET0),borderColor:'#1e8e5a',backgroundColor:'#1e8e5a',pointRadius:0,borderWidth:1.6,yAxisID:'y',order:0},
-    {type:'bar',label:'Rainfall',data:r.map(x=>x.PRECTOTCORR),backgroundColor:'#4e79a7cc',yAxisID:'y2',order:1}]},options:oP});
+    {type:'line',label:'ET₀ (FAO-56)',data:r.map(x=>cv('water',x.ET0)),borderColor:'#1e8e5a',backgroundColor:'#1e8e5a',pointRadius:0,borderWidth:1.6,yAxisID:'y',order:0},
+    {type:'bar',label:'Rainfall',data:r.map(x=>cv('water',x.PRECTOTCORR)),backgroundColor:'#4e79a7cc',yAxisID:'y2',order:1}]},options:oP});
   const o=base(); o.scales.y2={position:'right',ticks:{color:TICK},grid:{drawOnChartArea:false},min:0,max:100};
   S.charts.R=new Chart($('chR'),{type:'line',data:{labels:L,datasets:[
-    {label:'Rs all-sky',data:r.map(x=>x.ALLSKY_SFC_SW_DWN),borderColor:'#f28e2b',pointRadius:0,borderWidth:1.2},
-    {label:'Rs clear-sky',data:r.map(x=>x.CLRSKY_SFC_SW_DWN),borderColor:'#f28e2b80',borderDash:[4,3],pointRadius:0,borderWidth:1},
+    {label:'Rs all-sky',data:r.map(x=>cv('rad',x.ALLSKY_SFC_SW_DWN)),borderColor:'#f28e2b',pointRadius:0,borderWidth:1.2},
+    {label:'Rs clear-sky',data:r.map(x=>cv('rad',x.CLRSKY_SFC_SW_DWN)),borderColor:'#f28e2b80',borderDash:[4,3],pointRadius:0,borderWidth:1},
     {label:'RH',data:r.map(x=>x.RH2M),borderColor:'#b07aa1',pointRadius:0,borderWidth:1,yAxisID:'y2'}]},options:o});
 }
 function exportClimCSV(){
   const {rows,lat,lon}=S.climate;
-  const head=['date',...POWER_PARAMS,'ET0_FAO56_mm','GDD10'];
-  const out=[head,...rows.map(r=>[r.date,...POWER_PARAMS.map(k=>r[k]),r.ET0!=null?r.ET0.toFixed(3):'',r.GDD10!=null?r.GDD10.toFixed(2):''])];
-  downloadText(`nasapower_daily_${lat.toFixed(4)}_${lon.toFixed(4)}.csv`,toCSV(out));
+  const KIND={T2M:'temp',T2M_MAX:'temp',T2M_MIN:'temp',T2MDEW:'temp',WS2M:'wind',ALLSKY_SFC_SW_DWN:'rad',CLRSKY_SFC_SW_DWN:'rad',PRECTOTCORR:'water'};
+  const tag=k=>KIND[k]?'_'+ul(KIND[k]).replace('°','deg').replace('²','2').replace(/\//g,'per'):(k==='RH2M'?'_pct':k==='PS'?'_kPa':'');
+  const r3=x=>x==null?'':+x.toFixed(3);
+  const head=['date',...POWER_PARAMS.map(k=>k+tag(k)),'ET0_FAO56_'+ul('water'),IMP()?'GDD50F':'GDD10C'];
+  const out=[head,...rows.map(r=>[r.date,...POWER_PARAMS.map(k=>r3(KIND[k]?cv(KIND[k],r[k]):r[k])),r3(cv('water',r.ET0)),r3(cv('gdd',r.GDD10))])];
+  downloadText(`nasapower_daily_${lat.toFixed(4)}_${lon.toFixed(4)}_${IMP()?'imperial':'metric'}.csv`,toCSV(out));
 }
 
 /* ===================== Boot ===================== */
